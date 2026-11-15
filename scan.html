@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="sw">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Skana · 扫描</title>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%}
+body{font-family:-apple-system,"Segoe UI",Roboto,sans-serif;background:#0f1419;color:#fff;display:flex;flex-direction:column;height:100vh;overflow:hidden}
+.top{padding:10px 12px;display:flex;align-items:center;gap:8px;background:#0a7f5a;flex:0 0 auto}
+.top h1{font-size:15px;margin:0;font-weight:600;flex:1}
+.top .cnt{font-size:13px;background:rgba(255,255,255,.22);padding:3px 9px;border-radius:999px}
+.stage{position:relative;flex:1 1 auto;background:#000;min-height:0;overflow:hidden;display:flex;align-items:center;justify-content:center}
+video{width:100%;height:100%;object-fit:cover;display:block}
+.frame{position:absolute;left:4%;right:4%;top:38%;height:24%;border:2px dashed rgba(255,255,255,.65);border-radius:10px;pointer-events:none}
+.frame.oked{border-color:#34d399}
+.state{position:absolute;left:0;right:0;bottom:6px;text-align:center;font-size:12px;color:#d7dde2;text-shadow:0 1px 3px #000;padding:0 10px}
+.last{position:absolute;left:8px;top:8px;right:8px;background:rgba(10,127,90,.94);border-radius:10px;padding:8px 12px;font-size:15px;font-weight:600;display:none}
+.hud{position:absolute;right:8px;bottom:8px;display:flex;gap:6px;z-index:5}
+.hud button{background:rgba(0,0,0,.62);color:#fff;border:1px solid rgba(255,255,255,.35);border-radius:8px;padding:9px 11px;font-size:13px}
+.panel{flex:0 0 auto;background:#161b22;padding:8px 12px 12px}
+.row{display:flex;gap:8px;margin-bottom:8px}
+.row input{flex:1;min-width:0;font-size:16px;padding:11px 12px;border-radius:10px;border:1px solid #30363d;background:#0d1117;color:#fff;outline:none}
+.btn{font-size:15px;padding:11px 14px;border-radius:10px;border:0;font-weight:600;color:#fff;background:#0a7f5a}
+.btn2{background:#21262d;border:1px solid #30363d}
+.list{max-height:18vh;overflow:auto;margin:4px 0 8px}
+.list .rowi{display:flex;align-items:center;justify-content:space-between;font-size:15px;padding:7px 10px;border-bottom:1px solid #21262d}
+.list .rowi em{font-style:normal;color:#ff7b72;padding:0 6px;font-size:16px}
+.muted{font-size:12px;color:#9aa4ae;line-height:1.5}
+</style>
+</head>
+<body>
+<div class="top">
+  <h1>📡 Skana · 扫描</h1>
+  <span class="cnt" id="cnt">0</span>
+</div>
+
+<div class="stage" id="stage">
+  <video id="v" playsinline muted autoplay></video>
+  <div class="frame" id="frame"></div>
+  <div class="last" id="last"></div>
+  <div class="state" id="st">Inaanza kamera... · 正在打开摄像头...</div>
+  <div class="hud">
+    <button id="torchBtn" type="button">💡</button>
+    <button id="zoomIn" type="button">＋</button>
+    <button id="zoomOut" type="button">－</button>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="row">
+    <input id="q" inputmode="numeric" autocomplete="off" placeholder="Au andika namba · 也可手输表号">
+    <button class="btn" id="addBtn" type="button">Ongeza · 加入</button>
+  </div>
+  <div class="list" id="list"></div>
+  <div class="row">
+    <button class="btn2 btn" id="clearBtn" type="button" style="flex:1">Futa · 清空</button>
+    <button class="btn" id="doneBtn" type="button" style="flex:2">Maliza na rudi · 完成并返回</button>
+  </div>
+  <div class="row" style="margin-bottom:0">
+    <button class="btn2 btn" id="backOnly" type="button" style="flex:1">↩ Rudi kwenye mfumo · 只回系统</button>
+  </div>
+  <div class="muted" id="msg">Weka barcode ILI IJAZE fremu (15–25 cm); giza? gusa 💡; ikishindikana, gusa skrini kuza. · 让条码<strong>左右撑满虚线框</strong>（离 15–25 厘米）；太暗点 💡；还读不到<strong>点屏幕放大</strong>。</div>
+</div>
+
+<script>
+var HS = new URLSearchParams((location.hash || '').replace(/^#/, ''));
+var Q = new URLSearchParams(location.search);
+function P(k) { return Q.get(k) || HS.get(k) || ''; }
+var FALLBACK_EXEC = 'https://script.google.com/macros/s/AKfycbxir9G60dx_mNq-5V73J2UeaKwrZUtMidkxklg7VoSwIcmfFu0LASswUG_ZG3pjpyWvCQ/exec';
+var EXEC_URL = P('d') || localStorage.getItem('em_exec') || FALLBACK_EXEC;
+var MODE = P('m') || 'out';
+var TEAM = P('team') || P('t') || localStorage.getItem('em_team') || '';
+var TOK = P('tok') || P('k') || localStorage.getItem('em_tok') || '';
+try {
+  if (P('d')) localStorage.setItem('em_exec', P('d'));
+  if (P('team')) localStorage.setItem('em_team', P('team'));
+  if (P('tok')) localStorage.setItem('em_tok', P('tok'));
+} catch (e) {}
+
+var CODES = [], STREAM = null, TRACK = null, TORCH = false, ZOOMF = 1, ZOOMC = null;
+var LAST_CODE = '', LAST_TIME = 0;
+
+function beep() {
+  try {
+    var ac = window.__AC || (window.__AC = new (window.AudioContext || window.webkitAudioContext)());
+    if (ac.state === 'suspended') ac.resume();
+    var o = ac.createOscillator(), g = ac.createGain();
+    o.type = 'square'; o.frequency.value = 1050; g.gain.value = 0.09;
+    o.connect(g); g.connect(ac.destination); o.start();
+    setTimeout(function () { o.stop(); }, 70);
+  } catch (e) {}
+  try { if (navigator.vibrate) navigator.vibrate(45); } catch (e) {}
+}
+
+function digits(v) {
+  var s = String(v || ''), o = '';
+  for (var i = 0; i < s.length; i++) { var c = s.charAt(i); if (c >= '0' && c <= '9') o += c; }
+  return o;
+}
+
+function ui() {
+  document.getElementById('cnt').textContent = CODES.length;
+  document.getElementById('list').innerHTML = CODES.map(function (c, i) {
+    return '<div class="rowi"><b>' + c + '</b><em onclick="del(' + i + ')">✕</em></div>';
+  }).join('') || '<div class="muted">Bado hakuna · 还没扫到</div>';
+}
+window.del = function (i) { CODES.splice(i, 1); ui(); };
+
+function accept(raw) {
+  var m = digits(raw);
+  if (m.length < 8) return false;
+  // 防重复：1.5 秒内同一块表不重复加入
+  var now = Date.now();
+  if (m === LAST_CODE && now - LAST_TIME < 1500) return false;
+  if (CODES.indexOf(m) >= 0) return false;
+  LAST_CODE = m; LAST_TIME = now;
+  CODES.push(m);
+  beep();
+  var el = document.getElementById('last');
+  el.style.display = 'block';
+  el.textContent = '✓ ' + m + ' (' + CODES.length + ')';
+  document.getElementById('frame').className = 'frame oked';
+  setTimeout(function () { document.getElementById('frame').className = 'frame'; }, 600);
+  ui();
+  if (MODE === 'in') setTimeout(goBack, 320);
+  return true;
+}
+
+function goBack() {
+  if (!EXEC_URL) EXEC_URL = FALLBACK_EXEC;
+  var sep = EXEC_URL.indexOf('?') >= 0 ? '&' : '?';
+  var isOut = (MODE === 'out' || MODE === 'ret');
+  location.href = EXEC_URL + sep + 'mode=' + (isOut ? 'out' : '') +
+    '&m=' + encodeURIComponent(CODES.join(',')) +
+    (MODE === 'ret' ? '&tab=ret' : '') +
+    '&team=' + encodeURIComponent(TEAM) + '&tok=' + encodeURIComponent(TOK) + '&fresh=1';
+}
+
+document.getElementById('doneBtn').onclick = function () { goBack(); };
+document.getElementById('backOnly').onclick = function () { CODES = []; goBack(); };
+document.getElementById('clearBtn').onclick = function () { CODES = []; ui(); };
+document.getElementById('addBtn').onclick = function () {
+  var q = document.getElementById('q');
+  if (q.value.trim()) accept(q.value);
+  q.value = '';
+};
+function setState(t) { document.getElementById('st').textContent = t; }
+
+/* ---------- 摄像头：强制 1080p，失败再降级 ---------- */
+function startCamera() {
+  var v = document.getElementById('v');
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setState('Kamera haipatikani — andika kwa mkono. · 这台手机不支持摄像头，请手输号码。');
+    return;
+  }
+  // 优先 1080p 精确（条码占比够大才稳）
+  var tries = [
+    { audio: false, video: { facingMode: { ideal: 'environment' }, width: { exact: 1920 }, height: { exact: 1080 } } },
+    { audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } },
+    { audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } },
+    { audio: false, video: { facingMode: { ideal: 'environment' } } }
+  ];
+  var idx = 0;
+  function tryNext() {
+    if (idx >= tries.length) {
+      setState('Imeshindikana kufungua kamera — ruhusu kamera au andika kwa mkono · 打不开摄像头，请允许权限或手输');
+      return;
+    }
+    navigator.mediaDevices.getUserMedia(tries[idx++])
+      .then(function (s) {
+        STREAM = s; TRACK = s.getVideoTracks()[0] || null;
+        v.srcObject = s; v.play();
+        try { ZOOMC = TRACK.getCapabilities ? TRACK.getCapabilities().zoom : null; } catch (e) { ZOOMC = null; }
+        var st = TRACK && TRACK.getSettings ? TRACK.getSettings() : {};
+        setState('Kamera tayari · 摄像头已开 ' + (st.width || '') + 'x' + (st.height || ''));
+        startScanning(v);
+      })
+      .catch(function () { tryNext(); });
+  }
+  tryNext();
+}
+
+function applyZoom() {
+  if (!TRACK || !ZOOMC) { setState('Zoom haipatikani · 这台手机不支持变焦，请靠近条码'); return; }
+  var z = Math.min(ZOOMC.max || 1, Math.max(ZOOMC.min || 1, ZOOMF));
+  try { TRACK.applyConstraints({ advanced: [{ zoom: z }] }); setState('Zoom ' + z + 'x · 已放大'); } catch (e) {}
+}
+document.getElementById('torchBtn').onclick = function () {
+  if (!TRACK) return;
+  TORCH = !TORCH;
+  try { TRACK.applyConstraints({ advanced: [{ torch: TORCH }] }); } catch (e) {}
+  this.style.background = TORCH ? 'rgba(250,204,21,.9)' : 'rgba(0,0,0,.62)';
+  this.style.color = TORCH ? '#111' : '#fff';
+};
+document.getElementById('zoomIn').onclick = function () { ZOOMF = Math.min(8, ZOOMF + 0.5); applyZoom(); };
+document.getElementById('zoomOut').onclick = function () { ZOOMF = Math.max(1, ZOOMF - 0.5); applyZoom(); };
+
+/* 点一下屏幕 => 放大一级（比拉近镜头更快读到） */
+document.getElementById('stage').addEventListener('click', function () {
+  if (!TRACK) return;
+  ZOOMF = Math.min(8, Math.max(1, ZOOMF + 1));
+  applyZoom();
+  setState('Nimekuza · 已放大，对准条码再等一秒');
+});
+
+/* ---------- 识别：二维码优先（成功率远高于一维码），手机自带引擎优先 ---------- */
+var NATIVE = (typeof BarcodeDetector !== 'undefined');
+// 二维码放最前：如果表上有二维码，优先解（对距离/角度/光线要求低）
+var FORMATS = ['qr_code', 'code_128', 'data_matrix', 'code_39', 'code_93', 'itf', 'codabar', 'ean_13', 'ean_8'];
+var cv = document.createElement('canvas');
+var cx = cv.getContext('2d');
+
+/* 5 个取样带：从宽到窄，覆盖不同距离/大小的条码 */
+function grabBand(v, band) {
+  var vw = v.videoWidth, vh = v.videoHeight;
+  var sx, sy, sw, sh;
+  switch (band) {
+    case 0: sx = Math.round(vw*0.02); sy = Math.round(vh*0.36); sw = Math.round(vw*0.96); sh = Math.round(vh*0.28); break; // 最宽
+    case 1: sx = Math.round(vw*0.08); sy = Math.round(vh*0.40); sw = Math.round(vw*0.84); sh = Math.round(vh*0.20); break;
+    case 2: sx = Math.round(vw*0.18); sy = Math.round(vh*0.42); sw = Math.round(vw*0.64); sh = Math.round(vh*0.16); break; // 中窄
+    case 3: sx = Math.round(vw*0.28); sy = Math.round(vh*0.44); sw = Math.round(vw*0.44); sh = Math.round(vh*0.12); break; // 窄（条码很近时）
+    default: sx = 0; sy = 0; sw = vw; sh = vh; // 全图（二维码可能在任意位置）
+  }
+  cv.width = sw; cv.height = sh;
+  cx.drawImage(v, sx, sy, sw, sh, 0, 0, sw, sh);
+  return cv;
+}
+
+var det = null;
+function startScanning(v) {
+  if (NATIVE) { try { det = new BarcodeDetector({ formats: FORMATS }); } catch (e) { det = null; } }
+  if (det) { setState('Skana tayari · 可以扫了（手机自带引擎，最快）'); nativeLoop(v); }
+  else { setState('Inapakia kifaa cha akiba... · 这台浏览器不支持原生扫码，正在加载备用引擎'); fallbackLoop(v); }
+}
+
+var nBusy = false, nBand = 0, nMiss = 0, nAutoZoom = 0;
+function nativeLoop(v) {
+  var tick = function () {
+    if (nBusy || !v.videoWidth) { setTimeout(tick, 100); return; }
+    nBusy = true;
+    var band = nBand; nBand = (nBand + 1) % 5;
+    det.detect(grabBand(v, band)).then(function (cs) {
+      nBusy = false;
+      if (cs && cs.length) { nMiss = 0; nAutoZoom = 0; accept(cs[0].rawValue); }
+      else {
+        nMiss++;
+        if (nMiss === 10) setState('Bado haijasoma — ijaze fremu, au gusa ＋ · 还读不到：让条码撑满虚线框，或点＋放大');
+        if (nMiss === 25 && ZOOMC) {
+          // 连续失败自动放大一级
+          ZOOMF = Math.min(8, ZOOMF + 1);
+          applyZoom();
+          nMiss = 0;
+        }
+      }
+      setTimeout(tick, 90);
+    }, function () { nBusy = false; setTimeout(tick, 220); });
+  };
+  tick();
+}
+
+/* ---------- 备用路径：手机没有原生扫码时才下载引擎（zxing-wasm） ---------- */
+var W_OK = false, W_BUSY = false, W_PREP = null;
+function ensureWasm() {
+  if (W_OK) return Promise.resolve(true);
+  if (W_PREP) return W_PREP;
+  W_PREP = new Promise(function (res) {
+    var sc = document.createElement('script');
+    sc.src = 'https://cdn.jsdelivr.net/npm/zxing-wasm@2.2.1/dist/iife/reader/index.js';
+    sc.onload = function () {
+      try {
+        var pr = ZXingWASM.prepareZXingModule({ overrides: { locateFile: function (f) { return 'https://cdn.jsdelivr.net/npm/zxing-wasm@2.2.1/dist/reader/' + f; } } });
+        if (pr && pr.then) { pr.then(function () { W_OK = true; res(true); }, function () { res(false); }); }
+        else { W_OK = true; res(true); }
+      } catch (e) { res(false); }
+    };
+    sc.onerror = function () { res(false); };
+    document.head.appendChild(sc);
+  });
+  return W_PREP;
+}
+
+function fallbackLoop(v) {
+  ensureWasm().then(function (ok) {
+    if (!ok) { setState('Hakuna kifaa cha kusoma — andika namba kwa mkono. · 备用引擎下载不到，请直接手输表号。'); return; }
+    setState('Skana tayari · 可以扫了');
+    var band = 0;
+    var tick = function () {
+      if (W_BUSY || !v.videoWidth) { setTimeout(tick, 180); return; }
+      W_BUSY = true;
+      var c2 = grabBand(v, band); band = (band + 1) % 5;
+      var img = c2.getContext('2d').getImageData(0, 0, c2.width, c2.height);
+      ZXingWASM.readBarcodes(img, { formats: ['QRCode', 'DataMatrix', 'Code128', 'Code39', 'ITF', 'Codabar', 'Code93', 'EAN-13', 'EAN-8'], tryHarder: true })
+        .then(function (rs) { W_BUSY = false; if (rs && rs.length) accept(rs[0].text); setTimeout(tick, 130); },
+          function () { W_BUSY = false; setTimeout(tick, 280); });
+    };
+    tick();
+  });
+}
+
+ui();
+startCamera();
+</script>
+</body>
+</html>
