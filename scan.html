@@ -110,7 +110,14 @@ window.del = function (i) { CODES.splice(i, 1); ui(); };
 
 function accept(raw) {
   var m = digits(raw);
-  if (m.length < 8) return false;
+  // 表号必须是11位数字，多一位少一位都说明扫错了（别扫到 C1 / 2026）
+  if (m.length !== 11) {
+    if (m.length >= 5) {
+      setState('⚠ Namba si sahihi: imepata ' + m.length + ' tarakumu (inahitaji 11) — skani namba ya mita tu. · ⚠ 表号位数不对：扫到 ' + m.length + ' 位（应为11位），请对准表号条码重扫（别扫到 C1 / 2026）。');
+      try { if (navigator.vibrate) navigator.vibrate([120, 60, 120]); } catch (e) {}
+    }
+    return false;
+  }
   // 防重复：1.5 秒内同一块表不重复加入
   var now = Date.now();
   if (m === LAST_CODE && now - LAST_TIME < 1500) return false;
