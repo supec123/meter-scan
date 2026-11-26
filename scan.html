@@ -65,6 +65,7 @@ video{width:100%;height:100%;object-fit:cover;display:block}
     <button class="btn2 btn" id="backOnly" type="button" style="flex:1">↩ Rudi kwenye mfumo · 只回系统</button>
   </div>
   <div class="muted" id="msg">Weka barcode <strong>ILI IJAZE fremu</strong> (15–25 cm); giza? gusa 💡; ikishindikana, gusa skrini kuza. · 让条码<strong>左右撑满虚线框</strong>（离 15–25 厘米）；太暗点 💡；读不到<strong>点屏幕放大一级</strong>。</div>
+  <div class="muted" id="modeTip" style="margin-top:4px;color:#1565c0"></div>
 </div>
 
 <script>
@@ -84,14 +85,30 @@ try {
   if (P('tok')) localStorage.setItem('em_tok', P('tok'));
 } catch (e) {}
 
-/* in = 入库（连续扫，回 tab=in）；out = 出库；ret = 退换；其它 = 安装（扫一块就回） */
-var MI = (function () {
-  if (MODE === 'ret') return { label: 'Kurudisha · 退换', tab: 'ret', auto: false };
-  if (MODE === 'in')  return { label: 'Kupokea · 入库', tab: 'in',  auto: false };
-  if (MODE === 'out') return { label: 'Kutolea · 出库', tab: '',    auto: false };
-  return { label: 'Kufunga · 安装', tab: '', auto: true };
-})();
+/* 每种业务一套独立扫描逻辑，系统里点到哪个就带 m= 打开哪套：
+ *   install 安装 —— 连续扫一叠表，扫完回去系统里一块一块填（填完自动接下一块）
+ *   out     出库 —— 连续扫，按批次
+ *   in      入库 —— 连续扫，按批次
+ *   ret     退货 —— 连续扫（整批退回）
+ *   sw      更换 —— 成对扫：第 1 个是旧表，第 2 个是新表，一对一对地积
+ */
+var PROFILES = {
+  /* single: 一次只扫一块，读到立刻返回；pair: 旧表+新表一组；否则连续扫多块 */
+  /* ★ 安装：scanner 只收 1 块 → 0.9 秒后自动回「电表核对/登记」页，绝不连扫 */
+  install: { label: 'Kufunga · 安装（1 块/次）', back: 'install', tab: '', pair: false, single: true, box: false,
+             tip: 'Mita MOJA kwa skana moja — ikisomwa mara ya kwanza inarudi moja kwa moja kwenye ukaguzi. · 安装一次只扫一块：读到表号立刻自动返回「电表核对」页面，不会连扫第二块。' },
+  out:     { label: 'Kutolea · 出库', back: 'out',     tab: '',    pair: false, single: false, box: true,
+             tip: 'Endelea kuskani mita zote za kundi hili, kisha Maliza. · 出库可连续扫：把这一批全部扫完，再点完成返回。' },
+  in:      { label: 'Kupokea · 入库', back: 'in',      tab: 'in',  pair: false, single: false, box: true,
+             tip: 'Endelea kuskani mita zote zilizoingia ghala, kisha Maliza. · 入库可连续扫：把这一批到货全部扫完，再点完成返回。' },
+  ret:     { label: 'Kurudisha · 退货', back: 'ret',   tab: 'ret', pair: false, single: false, box: false,
+             tip: 'Endelea kuskani mita zote zinazorudishwa, kisha Maliza. · 退货可连续扫：把要退回的全部扫完，再点完成返回。' },
+  sw:      { label: 'Kubadilisha · 更换', back: 'sw',  tab: 'sw',  pair: true,  single: false, box: false,
+             tip: 'Skana mita ya ZAMANI kwanza, kisha ya MPYA — pair = kumbukumbu moja. · 更换：先扫「旧表」再扫「新表」，一对就是一条记录（旧表转故障、新表转出库）；可连续配多对。' }
+};
+var MI = PROFILES[MODE] || PROFILES.install;
 document.getElementById('ttl').textContent = '📡 ' + MI.label;
+if (MI.pair) document.getElementById('list').style.maxHeight = '26vh';
 
 /* ================= 状态 ================= */
 var CODES = [], STREAM = null, TRACK = null, TORCH = false, ZOOMF = 1, ZOOMC = null;
@@ -101,6 +118,15 @@ try {
   if (saved) CODES = JSON.parse(saved) || [];
 } catch (e) { CODES = []; }
 function persist() { try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(CODES)); } catch (e) {} }
+
+/* 更换模式：两个一组 */
+var PAIRS = [], SWSLOT = 'old';
+var PSESSION = 'em_scan_pairs_v2';
+try {
+  var sp = sessionStorage.getItem(PSESSION);
+  if (sp) PAIRS = JSON.parse(sp) || [];
+} catch (e) { PAIRS = []; }
+function persistPairs() { try { sessionStorage.setItem(PSESSION, JSON.stringify(PAIRS)); } catch (e) {} }
 
 /* ================= 反馈 ================= */
 function beep(ok) {
@@ -154,12 +180,28 @@ function banner(code, sub, ok) {
 
 /* ================= 清单 ================= */
 function ui() {
-  document.getElementById('cnt').textContent = CODES.length;
-  document.getElementById('list').innerHTML = CODES.map(function (c, i) {
+  var el = document.getElementById('list'), cnt = document.getElementById('cnt');
+  if (MI.pair) {
+    cnt.textContent = PAIRS.length;
+    var nextLab = (SWSLOT === 'old' ? '<b style="color:#e5484d">➊ Skana mita ya ZAMANI · 请扫「旧表」</b>' : '<b style="color:#0a7f5a">➋ Skana mita MPYA · 请扫「新表」</b>');
+    el.innerHTML = nextLab + (PAIRS.map(function (pr, i) {
+      return '<div class="rowi"><b>' + pr[0] + ' → ' + pr[1] + '</b><em onclick="delPair(' + i + ')">✕</em></div>';
+    }).join('') || '<div class="muted">Bado hakuna pair · 还没配成一组</div>');
+    return;
+  }
+  cnt.textContent = CODES.length;
+  if (MI.single) {
+    el.innerHTML = CODES.length
+      ? '<div class="rowi"><b>' + CODES[0] + '</b></div><div class="muted">Mita hii inapelekwa kwenye ukaguzi · 这一块会直接送到「电表核对」页</div>'
+      : '<div class="muted">Subiri mita moja · 等待扫描一块（一次只收一块）</div>';
+    return;
+  }
+  el.innerHTML = CODES.map(function (c, i) {
     return '<div class="rowi"><b>' + c + '</b><em onclick="del(' + i + ')">✕</em></div>';
   }).join('') || '<div class="muted">Bado hakuna · 还没扫到</div>';
 }
 window.del = function (i) { CODES.splice(i, 1); persist(); ui(); };
+window.delPair = function (i) { PAIRS.splice(i, 1); persistPairs(); ui(); };
 
 /* ================= 接收一个码 ================= */
 function accept(raw) {
@@ -174,6 +216,44 @@ function accept(raw) {
   }
   var now = Date.now();
   if (m === LAST_CODE && now - LAST_TIME < 900) return false;          // 同一码 0.9 秒内不重复触发
+
+  /* ---- 更换：旧表 → 新表 成对 ---- */
+  if (MI.pair) {
+    for (var pi = 0; pi < PAIRS.length; pi++) {
+      if (PAIRS[pi][0] === m || PAIRS[pi][1] === m) {
+        LAST_CODE = m; LAST_TIME = now;
+        banner(m, 'Ishatumika kwenye pair · 这块已经配过组了', false);
+        beep(false);
+        return false;
+      }
+    }
+    LAST_CODE = m; LAST_TIME = now;
+    if (SWSLOT === 'old') {
+      CODES.push(m); persist();
+      SWSLOT = 'new';
+      ui();
+      banner(m, 'ZAMANI ✓ · 旧表已记下，接着扫「新表」', true);
+      beep(true);
+      return true;
+    }
+    var oldM = CODES.length ? CODES[CODES.length - 1] : '';
+    if (!oldM || oldM === m) {                                          // 同一个码连扫两次
+      banner(m, 'Mita moja haiwezi kuwa zamani na mpya · 旧表和新表不能是同一块', false);
+      beep(false);
+      return false;
+    }
+    CODES.pop();                                                        // 旧表从未配对暂存里取出
+    persist();
+    PAIRS.push([oldM, m]);
+    persistPairs();
+    SWSLOT = 'old';
+    ui();
+    banner(oldM + ' → ' + m, 'Pair ' + PAIRS.length + ' imeongezwa · 已配成第 ' + PAIRS.length + ' 组', true);
+    beep(true);
+    return true;
+  }
+
+  /* ---- 普通连续模式 ---- */
   if (CODES.indexOf(m) >= 0) {                                         // 清单里已有
     LAST_CODE = m; LAST_TIME = now;
     banner(m, 'Ishatiwa · 这一块已在清单里', false);
@@ -181,12 +261,18 @@ function accept(raw) {
     return false;
   }
   LAST_CODE = m; LAST_TIME = now;
-  CODES.push(m);
+  CODES = [m];                                                          // 单块模式永远只有这一块
   persist();
   ui();
   banner(m, 'Zimeongezwa ' + CODES.length + ' · 已加入 ' + CODES.length + ' 块', true);
   beep(true);
-  if (MI.auto) setTimeout(goBack, 1200);                                 // 安装模式：扫一块就回
+  if (MI.single) {                                                      // 安装：一块即返回核对页
+    CODES = [m]; persist();
+    ui();
+    setState('✓ ' + m + ' — narudi kwenye ukaguzi · 已读到，0.9 秒后自动返回「电表核对」页');
+    document.getElementById('doneBtn').disabled = true;
+    setTimeout(goBack, 900);
+  }
   return true;
 }
 
@@ -194,16 +280,23 @@ function accept(raw) {
 function goBack() {
   if (!EXEC_URL) EXEC_URL = FALLBACK_EXEC;
   var sep = EXEC_URL.indexOf('?') >= 0 ? '&' : '?';
-  var isOut = (MODE === 'out' || MODE === 'ret' || MODE === 'in');
   var tab = MI.tab ? ('&tab=' + MI.tab) : '';
-  location.href = EXEC_URL + sep + 'mode=' + (isOut ? 'out' : '') +
-    '&m=' + encodeURIComponent(CODES.join(',')) + tab +
+  var flat = CODES.slice();
+  if (MI.pair) {
+    flat = [];                                                          // 旧表→新表 平铺成 o1,n1,o2,n2
+    for (var i = 0; i < PAIRS.length; i++) { flat.push(PAIRS[i][0]); flat.push(PAIRS[i][1]); }
+  }
+  location.href = EXEC_URL + sep + 'mode=' + MI.back +
+    '&m=' + encodeURIComponent(flat.join(',')) + tab +
     '&team=' + encodeURIComponent(TEAM) + '&tok=' + encodeURIComponent(TOK) + '&fresh=1';
 }
 
 document.getElementById('doneBtn').onclick = function () { goBack(); };
-document.getElementById('backOnly').onclick = function () { CODES = []; persist(); goBack(); };
-document.getElementById('clearBtn').onclick = function () { CODES = []; persist(); ui(); };
+document.getElementById('backOnly').onclick = function () { CODES = []; PAIRS = []; persist(); persistPairs(); goBack(); };
+document.getElementById('clearBtn').onclick = function () { CODES = []; PAIRS = []; SWSLOT = 'old'; persist(); persistPairs(); ui(); };
+document.getElementById('doneBtn').textContent = MI.pair
+  ? 'Maliza na rudi · 完成并返回（带上所有配对）'
+  : (MI.single ? 'Rudi bila kuskani · 不扫了，直接返回' : 'Maliza na rudi · 完成并返回');
 
 /* 手输 / 粘贴（支持逗号、空格、换行一次贴多块） */
 function addManual(text) {
@@ -288,32 +381,56 @@ try {
   navigator.wakeLock && navigator.wakeLock.request('screen').catch(function () {});
 } catch (e) {}
 
-/* ================= 取样 ================= */
+/* ================= 取样 =================
+ * 现场两种条码：①电表本体标签——条码是「竖排」的（标签旋转 90°）
+ *              ②纸箱标签——条码横排，一箱 6 个
+ * 所以每帧都同时解「横向带」和「旋转 90° 的同一块」，哪个先读到就收。
+ * 1D 条码怕糊：只用原分辨率（最多缩到 1600 宽），不激进降采样。
+ */
 var NATIVE = (typeof BarcodeDetector !== 'undefined');
 var FORMATS = ['code_128', 'code_39', 'itf', 'code_93', 'codabar', 'ean_13', 'qr_code', 'data_matrix', 'ean_8'];
-var cv = document.createElement('canvas');
-var cx = cv.getContext('2d', { willReadFrequently: true });
+var cvH = document.createElement('canvas'), cxH = cvH.getContext('2d', { willReadFrequently: true });
+var cvV = document.createElement('canvas'), cxV = cvV.getContext('2d', { willReadFrequently: true });
+var MAXW = 1600;
 
-/** 4 条横向取样带（宽→窄）+ 偶尔全图；返回 canvas（已按最大宽度缩放，保证解码速度） */
-var MAXW = 1280;
-function grabBand(v, band) {
+var POS = [
+  { sy: 0.30, sh: 0.40 },   // 中间（最常见）
+  { sy: 0.18, sh: 0.62 },   // 偏上 / 大范围
+  { sy: 0.34, sh: 0.30 }    // 窄带（贴近、条码很大）
+];
+var SCALES = [1, 1.5];      // 小条码（电表本体标签）靠 1.5 倍放大才稳
+
+function cropH(v, pos, scale) {
   var vw = v.videoWidth, vh = v.videoHeight;
-  var sx, sy, sw, sh;
-  switch (band) {
-    case 0: sx = Math.round(vw * 0.02); sy = Math.round(vh * 0.34); sw = Math.round(vw * 0.96); sh = Math.round(vh * 0.30); break;
-    case 1: sx = Math.round(vw * 0.08); sy = Math.round(vh * 0.38); sw = Math.round(vw * 0.84); sh = Math.round(vh * 0.24); break;
-    case 2: sx = Math.round(vw * 0.16); sy = Math.round(vh * 0.40); sw = Math.round(vw * 0.68); sh = Math.round(vh * 0.20); break;
-    case 3: sx = Math.round(vw * 0.26); sy = Math.round(vh * 0.42); sw = Math.round(vw * 0.48); sh = Math.round(vh * 0.16); break;
-    default: sx = 0; sy = 0; sw = vw; sh = vh;
-  }
+  var sx = Math.round(vw * 0.02), sw = Math.round(vw * 0.96);
+  var sy = Math.round(vh * pos.sy), sh = Math.round(vh * pos.sh);
   var sc = sw > MAXW ? MAXW / sw : 1;
-  cv.width = Math.round(sw * sc); cv.height = Math.round(sh * sc);
-  cx.drawImage(v, sx, sy, sw, sh, 0, 0, cv.width, cv.height);
-  return cv;
+  cvH.width = Math.round(sw * sc * scale); cvH.height = Math.round(sh * sc * scale);
+  cxH.imageSmoothingEnabled = true;
+  cxH.drawImage(v, sx, sy, sw, sh, 0, 0, cvH.width, cvH.height);
+  return cvH;
 }
 
-/* ================= 识别循环 ================= */
-var det = null;
+/** 同一块区域旋转 90°：让「竖排条码」变成横排再解（电表本体标签就是竖排） */
+function cropV(v, pos, scale) {
+  var vw = v.videoWidth, vh = v.videoHeight;
+  var sx = Math.round(vw * 0.02), sw = Math.round(vw * 0.96);
+  var sy = Math.round(vh * pos.sy), sh = Math.round(vh * pos.sh);
+  var sc = sw > MAXW ? MAXW / sw : 1;
+  var w = Math.round(sw * sc * scale), h = Math.round(sh * sc * scale);
+  cvV.width = h; cvV.height = w;                       // 交换宽高
+  cxV.imageSmoothingEnabled = true;
+  cxV.save();
+  cxV.translate(h / 2, w / 2);
+  cxV.rotate(-Math.PI / 2);
+  cxV.drawImage(v, sx, sy, sw, sh, -w / 2, -h / 2, w, h);
+  cxV.restore();
+  return cvV;
+}
+
+/* ================= 引擎 ================= */
+var det = null, ZXOK = false;
+
 function buildDetector() {
   if (!NATIVE) return Promise.resolve(null);
   var mk = function (list) {
@@ -322,56 +439,13 @@ function buildDetector() {
   if (!BarcodeDetector.getSupportedFormats) return Promise.resolve(mk(FORMATS));
   return BarcodeDetector.getSupportedFormats().then(function (sup) {
     var ok = FORMATS.filter(function (f) { return sup.indexOf(f) >= 0; });
-    if (!ok.length) return null;
-    return mk(ok);
+    return ok.length ? mk(ok) : null;
   }).catch(function () { return mk(['code_128']); });
 }
 
-function startScanning(v) {
-  buildDetector().then(function (d) {
-    det = d;
-    if (det) {
-      setState('Skana tayari · 可以扫了（手机自带引擎，最快）');
-      nativeLoop(v);
-    } else {
-      setState('Inapakia kifaa cha akiba... · 这台浏览器不支持原生扫码，正在加载备用引擎');
-      fallbackLoop(v);
-    }
-  });
-}
-
-var nBusy = false, nBand = 0, nMiss = 0, nHit = 0;
-function nativeLoop(v) {
-  var tick = function () {
-    if (nBusy || !v.videoWidth) { setTimeout(tick, 60); return; }
-    nBusy = true;
-    var band = (nBand % 5); nBand = (nBand + 1) % 5;
-    det.detect(grabBand(v, band)).then(function (cs) {
-      nBusy = false;
-      if (cs && cs.length) {
-        nMiss = 0; nHit++;
-        var hit = false;
-        for (var i = 0; i < cs.length && !hit; i++) hit = accept(cs[i].rawValue);
-        setTimeout(tick, hit ? 70 : 60);
-      } else {
-        nMiss++; nHit = 0;
-        if (nMiss === 8) setState('Bado haijasoma — ijaze fremu, au gusa ＋ · 还读不到：让条码撑满虚线框，或点＋放大');
-        if (nMiss === 22 && ZOOMC && nHit === 0) {
-          ZOOMF = Math.min(8, ZOOMF + 1);
-          applyZoom();
-          nMiss = 0;
-        }
-        setTimeout(tick, 70);
-      }
-    }, function () { nBusy = false; setTimeout(tick, 200); });
-  };
-  tick();
-}
-
-/* ================= 备用引擎（浏览器没有原生扫码时） ================= */
-var W_OK = false, W_BUSY = false, W_PREP = null;
+var W_PREP = null;
 function ensureWasm() {
-  if (W_OK) return Promise.resolve(true);
+  if (ZXOK) return Promise.resolve(true);
   if (W_PREP) return W_PREP;
   W_PREP = new Promise(function (res) {
     var sc = document.createElement('script');
@@ -379,8 +453,8 @@ function ensureWasm() {
     sc.onload = function () {
       try {
         var pr = ZXingWASM.prepareZXingModule({ overrides: { locateFile: function (f) { return 'https://cdn.jsdelivr.net/npm/zxing-wasm@2.2.1/dist/reader/' + f; } } });
-        if (pr && pr.then) pr.then(function () { W_OK = true; res(true); }, function () { res(false); });
-        else { W_OK = true; res(true); }
+        if (pr && pr.then) pr.then(function () { ZXOK = true; res(true); }, function () { res(false); });
+        else { ZXOK = true; res(true); }
       } catch (e) { res(false); }
     };
     sc.onerror = function () { res(false); };
@@ -389,30 +463,71 @@ function ensureWasm() {
   return W_PREP;
 }
 
-function fallbackLoop(v) {
-  ensureWasm().then(function (ok) {
-    if (!ok) { setState('Hakuna kifaa cha kusoma — andika namba kwa mkono. · 备用引擎下载不到，请直接手输表号。'); return; }
-    setState('Skana tayari · 可以扫了');
-    var band = 0;
-    var tick = function () {
-      if (W_BUSY || !v.videoWidth) { setTimeout(tick, 160); return; }
-      W_BUSY = true;
-      var c2 = grabBand(v, band); band = (band + 1) % 5;
-      var img = c2.getContext('2d').getImageData(0, 0, c2.width, c2.height);
-      ZXingWASM.readBarcodes(img, {
-        formats: ['Code128', 'Code39', 'ITF', 'Codabar', 'Code93', 'EAN-13', 'QRCode', 'DataMatrix', 'EAN-8'],
-        tryHarder: true, tryRotate: false, tryDownscale: true, maxNumberOfSymbols: 3
-      }).then(function (rs) {
-        W_BUSY = false;
-        if (rs && rs.length) { for (var i = 0; i < rs.length; i++) { if (accept(rs[i].text)) break; } }
-        setTimeout(tick, 120);
-      }, function () { W_BUSY = false; setTimeout(tick, 260); });
-    };
-    tick();
+function zxRead(canvas) {
+  if (!ZXOK || !canvas.width) return Promise.resolve('');
+  var img = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
+  return ZXingWASM.readBarcodes(img, {
+    formats: ['Code128', 'Code39', 'ITF', 'Codabar', 'Code93', 'EAN-13'],
+    tryHarder: true,
+    tryRotate: true,
+    tryDownscale: false,
+    maxNumberOfSymbols: 3
+  }).then(function (rs) {
+    for (var i = 0; i < (rs || []).length; i++) { if (rs[i] && rs[i].text) return rs[i].text; }
+    return '';
+  }).catch(function () { return ''; });
+}
+
+/* ================= 主循环 ================= */
+var BUSY = false, PI = 0, MISS = 0;
+function startScanning(v) {
+  var nativeP = buildDetector();
+  var wasmP = ensureWasm();
+  Promise.all([nativeP, wasmP]).then(function (r) {
+    det = r[0];
+    ZXOK = !!r[1];
+    setState(ZXOK
+      ? (det ? 'Skana tayari · 可以扫了（双引擎：横排+竖排都识）' : 'Skana tayari · 可以扫了（备用引擎）')
+      : (det ? 'Skana tayari · 可以扫了（手机自带引擎）' : 'Hakuna kifaa cha kusoma — andika kwa mkono · 没有可用解码引擎，请手输'));
+    loop(v);
   });
 }
 
+var SI = 0;
+function loop(v) {
+  var tick = function () {
+    if (BUSY || !v.videoWidth) { setTimeout(tick, 55); return; }
+    BUSY = true;
+    var pos = POS[PI], scale = SCALES[SI];
+    PI = (PI + 1) % POS.length;
+    if (PI === 0) SI = (SI + 1) % SCALES.length;
+    var ch = cropH(v, pos, scale), cvr = cropV(v, pos, scale);
+
+    var jobs = [];
+    if (ZXOK) { jobs.push(zxRead(ch)); jobs.push(zxRead(cvr)); }
+    if (det) jobs.push(det.detect(ch).then(function (cs) { return (cs && cs[0] && cs[0].rawValue) || ''; }).catch(function () { return ''; }));
+
+    Promise.all(jobs).then(function (vals) {
+      BUSY = false;
+      var got = false;
+      for (var i = 0; i < vals.length && !got; i++) {
+        var raw = vals[i];
+        if (raw) got = accept(raw);
+        if (got) break;
+      }
+      if (got) { MISS = 0; setTimeout(tick, 60); return; }
+      MISS++;
+      if (MISS === 8) setState('Bado haijasoma — songa karibu zaidi hadi mita 0.2, ipitishe kwenye mstari · 还读不到：请靠近到 20cm 以内，把标签条码撑满虚线框（本体标签条码是竖的，系统已自动横竖各扫一遍）');
+      if (MISS === 20) { if (ZOOMC) { ZOOMF = Math.min(8, ZOOMF + 1); applyZoom(); } else setState('Kiwango cha zoom hakipo — karibia zaidi · 手机不支持变焦，请把手机贴近标签'); MISS = 0; }
+      setTimeout(tick, 55);
+    });
+  };
+  tick();
+}
+
 /* 启动 */
+if (MI.single) { CODES = []; persist(); }        // 单块模式每次进来只认一块，不带上一次残留
+document.getElementById('modeTip').textContent = MI.tip;
 ui();
 startCamera();
 </script>
